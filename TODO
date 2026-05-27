@@ -1,0 +1,11 @@
+- repl (core)
+- PATH support /finding
+- some builtins
+
+? readline
+? support shabang
+? scripting, custom shell dialect
+? jobs/background processes (bg,fg)
+
+not goals:
+- posix compliance
