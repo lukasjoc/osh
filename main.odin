@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:log"
+import "core:mem"
 
 LINE_LENGTH_MAX :: 256
 
@@ -19,7 +20,7 @@ shell_state_init :: proc () -> Shell_State {
 
 find_executable :: proc (state: Shell_State, needle: string) -> (path: string, err: os.Error) {
     if os.is_file(needle) {
-        panic(fmt.aprintf("file path: %s", needle))
+        return os.get_absolute_path(needle, context.allocator)
     }
     for path in state.path {
         log.debugf("searching bin path: %v", path)
@@ -38,14 +39,26 @@ find_executable :: proc (state: Shell_State, needle: string) -> (path: string, e
     return "", nil
 }
 
-// TODO:
-// found2, fullpath2 := find_executable(state, "./osh")
-// fmt.println("found", found2, fullpath2)
-
 main :: proc() {
-    context.logger = log.create_console_logger(.Debug)
+    when ODIN_DEBUG {
+        track: mem.Tracking_Allocator
+        mem.tracking_allocator_init(&track, context.allocator)
+        context.allocator = mem.tracking_allocator(&track)
+
+        defer {
+            if len(track.allocation_map) > 0 {
+                fmt.eprintf("=== %v allocations not freed: ===\n", len(track.allocation_map))
+                for _, entry in track.allocation_map {
+                    fmt.eprintf("- %v bytes @ %v\n", entry.size, entry.location)
+                }
+            }
+            mem.tracking_allocator_destroy(&track)
+        }
+        context.logger = log.create_console_logger(.Debug)
+    }
+
+    context.logger = log.create_console_logger(.Error)
     state := shell_state_init()
-    log.debugf("%v", state)
 
     for {
         buf: [LINE_LENGTH_MAX]byte
@@ -55,13 +68,17 @@ main :: proc() {
             fmt.eprintfln("osh: error: %v", err)
             break;
         }
+        // TODO: escape quotes
+        // TODO: asciiquarium is very fast
         command := strings.split(strings.trim_right(string(buf[:n]), "\n "), " ")
 
         log.debugf("parsed command: %v", command)
 
+        // TODO: support for builtins
+
         fullpath, errfind := find_executable(state, command[0])
         if errfind != nil {
-            fmt.eprintfln("osh(%v): %v: %v", command[0], err)
+            fmt.eprintfln("osh(%v): %v: %v", command[0], errfind)
             continue
         }
         img := command[0]
@@ -70,12 +87,12 @@ main :: proc() {
             case: {
                 process, errstart := os.process_start({ "", command, nil, os.stderr, os.stdout, nil })
                 if errstart != nil {
-                    fmt.eprintfln("osh: %v: %v", img, err)
+                    fmt.eprintfln("osh: %v: %v", img, errstart)
                     continue
                 }
                 state, errwait := os.process_wait(process)
                 if errwait != nil {
-                    fmt.eprintfln("osh(%v): %v: %v", state.exit_code, img, err)
+                    fmt.eprintfln("osh(%v): %v: %v", state.exit_code, img, errwait)
                     continue
                 }
             }

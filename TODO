@@ -1,5 +1,3 @@
-- repl (core)
-- PATH support /finding
 - some builtins
 
 ? readline
