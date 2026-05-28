@@ -1,12 +1,13 @@
 package main
 
+import "core:bytes"
 import "core:fmt"
 import "core:log"
 import "core:mem"
 import "core:os"
 import "core:strings"
 
-LINE_LENGTH_MAX :: 256
+INPUT_LEN_MAX :: 256
 
 Shell_State :: struct {
 	path: []string,
@@ -40,12 +41,34 @@ find_executable :: proc(state: Shell_State, needle: string) -> (path: string, er
 	return "", nil
 }
 
+parse_input :: proc(input: []byte) -> (toks: [dynamic]string, err: os.Error) {
+	log.debugf("input: %v", input)
+
+	temp := strings.builder_make(context.temp_allocator) or_return
+	defer strings.builder_destroy(&temp)
+
+	for r in string(input) {
+		if bytes.is_ascii_space(r) {
+            // TODO: optimize. i'd rather copy into toks directly
+			tok := strings.clone(strings.to_string(temp))
+			log.debugf("tok: %v -> %v", tok, cast(u8)r)
+			append(&toks, tok)
+			strings.builder_reset(&temp)
+		} else {
+            // TODO: handle literals
+			strings.write_rune(&temp, r)
+		}
+	}
+
+	log.debugf("parsed toks: %v", toks)
+	return toks, nil
+}
+
 main :: proc() {
 	when ODIN_DEBUG {
 		track: mem.Tracking_Allocator
 		mem.tracking_allocator_init(&track, context.allocator)
 		context.allocator = mem.tracking_allocator(&track)
-
 		defer {
 			if len(track.allocation_map) > 0 {
 				fmt.eprintf("=== %v allocations not freed: ===\n", len(track.allocation_map))
@@ -55,48 +78,52 @@ main :: proc() {
 			}
 			mem.tracking_allocator_destroy(&track)
 		}
-		context.logger = log.create_console_logger(.Debug)
-	} else {
-		context.logger = log.create_console_logger(.Error)
 	}
+
+	context.logger = log.create_console_logger(.Debug when ODIN_DEBUG else .Info)
 
 	state := shell_state_init()
 
 	for {
-		buf: [LINE_LENGTH_MAX]byte
+		buf: [INPUT_LEN_MAX]byte
+
 		fmt.printf("%v:$ ", os.args[0])
+
 		n, err := os.read(os.stdin, buf[:])
 		if err != nil {
 			fmt.eprintfln("osh: error: %v", err)
 			break
 		}
-		// TODO: escape quotes
-		command := strings.split(strings.trim_right(string(buf[:n]), "\n "), " ")
 
-		log.debugf("parsed command: %v", command)
-
-		// TODO: support for builtins
-		fullpath, errfind := find_executable(state, command[0])
-		if errfind != nil {
-			fmt.eprintfln("osh(%v): %v: %v", command[0], errfind)
+		toks, parse_err := parse_input(buf[:n])
+		if parse_err != nil {
+			log.warnf("could not parse input: %v", err)
 			continue
 		}
-		img := command[0]
-		switch len(fullpath) {
-		case 0:
-			fmt.eprintfln("osh: %v: not found", img)
-		case:
-			desc := os.Process_Desc{"", command, nil, os.stderr, os.stdout, os.stdin}
-			process, errstart := os.process_start(desc)
-			if errstart != nil {
-				fmt.eprintfln("osh: %v: %v", img, errstart)
-				continue
-			}
-			state, errwait := os.process_wait(process)
-			if errwait != nil {
-				fmt.eprintfln("osh(%v): %v: %v", state.exit_code, img, errwait)
-				continue
-			}
-		}
+
+		// TODO: fix leaks
+		// TODO: support for builtins
+		// fullpath, find_err := find_executable(state, toks[0])
+		// if find_err != nil {
+		// 	fmt.eprintfln("osh(%v): %v: %v", toks[0], find_err)
+		// 	continue
+		// }
+		// img := toks[0]
+		// switch len(fullpath) {
+		// case 0:
+		// 	fmt.eprintfln("osh: %v: not found", img)
+		// case:
+		// 	desc := os.Process_Desc{"", toks[:], nil, os.stderr, os.stdout, os.stdin}
+		// 	process, start_err := os.process_start(desc)
+		// 	if start_err != nil {
+		// 		fmt.eprintfln("osh: %v: %v", img, start_err)
+		// 		continue
+		// 	}
+		// 	state, wait_err := os.process_wait(process)
+		// 	if wait_err != nil {
+		// 		fmt.eprintfln("osh(%v): %v: %v", state.exit_code, img, wait_err)
+		// 		continue
+		// 	}
+		// }
 	}
 }
