@@ -1,6 +1,5 @@
 package main
 
-import "core:bytes"
 import "core:fmt"
 import "core:log"
 import "core:mem"
@@ -115,15 +114,24 @@ main :: proc() {
 			continue
 		}
 
+		img := toks[0]
+		if img == "exit" {
+			break
+		} else if img == "type" {
+			log.fatal("TODO: type builtin not supported")
+			continue
+		} else if img == "cd" {
+			log.fatal("TODO: cd builtin not supported")
+			continue
+		}
+
 		// TODO: fix leaks
-		// TODO: support for builtins
 		fullpath, find_err := find_executable(state, toks[0])
 		if find_err != nil {
 			fmt.eprintfln("osh(%v): %v: %v", toks[0], find_err)
 			continue
 		}
 
-		img := toks[0]
 		switch len(fullpath) {
 		case 0:
 			fmt.eprintfln("osh: %v: not found", img)

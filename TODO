@@ -1,9 +1,19 @@
 - some builtins
+ - cd
+ - type
+ - exit
+ - ??
 
-? readline
+? pipes
+? redirects
+? && / ;
 ? support shabang
-? scripting, custom shell dialect
+? lightweight readline-ish support
+ - basic navigation
+ - history
+ - vi mode
 ? jobs/background processes (bg,fg)
+? scripting, custom shell dialect
 
 not goals:
 - posix compliance
