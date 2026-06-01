@@ -41,25 +41,39 @@ find_executable :: proc(state: Shell_State, needle: string) -> (path: string, er
 	return "", nil
 }
 
-parse_input :: proc(input: []byte) -> (toks: [dynamic]string, err: os.Error) {
-	log.debugf("input: %v", input)
+parse_string_lit :: #force_inline proc(s: string) -> int {
+	delim := s[0]
+	assert(delim == '"' || delim == '\'', "expected quote")
+	n := 1
+	for ; n < len(s); n += 1 {
+		if s[n] == delim {break}
+	}
+	assert(s[n] == delim, "expected a matching quote")
+	return n
+}
 
-	temp := strings.builder_make(context.temp_allocator) or_return
-	defer strings.builder_destroy(&temp)
+parse_field :: #force_inline proc(s: string) -> int {
+	n := 1
+	for ; n < len(s); n += 1 {
+		if s[n] == ' ' || s[n] == '\n' {break}
+	}
+	return n
+}
 
-	for r in string(input) {
-		if bytes.is_ascii_space(r) {
-            // TODO: optimize. i'd rather copy into toks directly
-			tok := strings.clone(strings.to_string(temp))
-			log.debugf("tok: %v -> %v", tok, cast(u8)r)
-			append(&toks, tok)
-			strings.builder_reset(&temp)
+parse_input :: proc(s: string) -> (toks: [dynamic]string, err: os.Error) {
+	for pos := 0; pos < len(s); pos += 1 {
+		ch := s[pos]
+		if ch == ' ' || ch == '\n' {continue}
+		if ch == '"' || ch == '\'' {
+			n := parse_string_lit(s[pos:])
+			append(&toks, s[pos + 1:pos + n])
+			pos += n
 		} else {
-            // TODO: handle literals
-			strings.write_rune(&temp, r)
+			n := parse_field(s[pos:])
+			append(&toks, s[pos:pos + n])
+			pos += n
 		}
 	}
-
 	log.debugf("parsed toks: %v", toks)
 	return toks, nil
 }
@@ -95,7 +109,7 @@ main :: proc() {
 			break
 		}
 
-		toks, parse_err := parse_input(buf[:n])
+		toks, parse_err := parse_input(string(buf[:n]))
 		if parse_err != nil {
 			log.warnf("could not parse input: %v", err)
 			continue
@@ -103,27 +117,28 @@ main :: proc() {
 
 		// TODO: fix leaks
 		// TODO: support for builtins
-		// fullpath, find_err := find_executable(state, toks[0])
-		// if find_err != nil {
-		// 	fmt.eprintfln("osh(%v): %v: %v", toks[0], find_err)
-		// 	continue
-		// }
-		// img := toks[0]
-		// switch len(fullpath) {
-		// case 0:
-		// 	fmt.eprintfln("osh: %v: not found", img)
-		// case:
-		// 	desc := os.Process_Desc{"", toks[:], nil, os.stderr, os.stdout, os.stdin}
-		// 	process, start_err := os.process_start(desc)
-		// 	if start_err != nil {
-		// 		fmt.eprintfln("osh: %v: %v", img, start_err)
-		// 		continue
-		// 	}
-		// 	state, wait_err := os.process_wait(process)
-		// 	if wait_err != nil {
-		// 		fmt.eprintfln("osh(%v): %v: %v", state.exit_code, img, wait_err)
-		// 		continue
-		// 	}
-		// }
+		fullpath, find_err := find_executable(state, toks[0])
+		if find_err != nil {
+			fmt.eprintfln("osh(%v): %v: %v", toks[0], find_err)
+			continue
+		}
+
+		img := toks[0]
+		switch len(fullpath) {
+		case 0:
+			fmt.eprintfln("osh: %v: not found", img)
+		case:
+			desc := os.Process_Desc{"", toks[:], nil, os.stderr, os.stdout, os.stdin}
+			process, start_err := os.process_start(desc)
+			if start_err != nil {
+				fmt.eprintfln("osh: %v: %v", img, start_err)
+				continue
+			}
+			state, wait_err := os.process_wait(process)
+			if wait_err != nil {
+				fmt.eprintfln("osh(%v): %v: %v", state.exit_code, img, wait_err)
+				continue
+			}
+		}
 	}
 }
