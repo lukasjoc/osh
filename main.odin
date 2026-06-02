@@ -9,13 +9,14 @@ import "core:strings"
 INPUT_LEN_MAX :: 256
 
 Shell_State :: struct {
-	path: []string,
+	path:      []string,
+	prev_path: Maybe(string),
 }
 
 shell_state_init :: proc() -> Shell_State {
 	value, _ := os.lookup_env_alloc("PATH", context.allocator)
 	path := strings.split(value, ":")
-	return {path}
+	return {path, nil}
 }
 
 find_executable :: proc(state: Shell_State, needle: string) -> (path: string, err: os.Error) {
@@ -102,26 +103,54 @@ main :: proc() {
 
 		fmt.printf("%v:$ ", os.args[0])
 
-		n, err := os.read(os.stdin, buf[:])
-		if err != nil {
-			fmt.eprintfln("osh: error: %v", err)
+		n, read_err := os.read(os.stdin, buf[:])
+		if read_err != nil {
+			fmt.eprintfln("osh: error: %v", read_err)
 			break
 		}
 
 		toks, parse_err := parse_input(string(buf[:n]))
 		if parse_err != nil {
-			log.warnf("could not parse input: %v", err)
+			log.warnf("could not parse input: %v", parse_err)
 			continue
 		}
 
+		if len(toks) == 0 {continue}
+
 		img := toks[0]
 		if img == "exit" {
-			break
+			os.exit(0)
 		} else if img == "type" {
 			log.fatal("TODO: type builtin not supported")
 			continue
 		} else if img == "cd" {
-			log.fatal("TODO: cd builtin not supported")
+			// TODO: cd without args into home
+
+            // TODO: cd - is still slightly buggy
+			path := toks[1]
+			if path == "-" {
+				prev_path, ok := state.prev_path.?
+				if ok {
+					curr :=
+						os.get_working_directory(context.allocator) or_else panic(
+							"should get current dir",
+						)
+					os.change_directory(prev_path)
+					log.debugf("changed dir to:%v, curr:%v", state, curr)
+					state.prev_path = curr
+				} else {
+					// todo should fail
+					panic("TODO")
+				}
+			} else if os.is_directory(path) {
+				err := os.change_directory(path)
+				if err != nil {
+					panic("TODO")
+				} else {
+					state.prev_path = path
+					log.debugf("changed dir to:%v", path)
+				}
+			}
 			continue
 		}
 
