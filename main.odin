@@ -9,26 +9,27 @@ import "core:strings"
 INPUT_LEN_MAX :: 256
 
 Shell_State :: struct {
-	path:      []string,
-	prev_path: Maybe(string),
+	runtime_path: []string,
+	oldpath:      string,
+	currpath:     string,
 }
 
-shell_state_init :: proc() -> Shell_State {
+shell_state_init :: proc() -> (state: Shell_State, init_err: os.Error) {
 	value, _ := os.lookup_env_alloc("PATH", context.allocator)
 	path := strings.split(value, ":")
-	return {path, nil}
+	dir := os.get_working_directory(context.allocator) or_return
+	return {runtime_path = path, oldpath = "", currpath = dir}, nil
 }
 
 find_executable :: proc(state: Shell_State, needle: string) -> (path: string, err: os.Error) {
 	if os.is_file(needle) {
 		return os.get_absolute_path(needle, context.allocator)
 	}
-
-	for path in state.path {
-		log.debugf("searching bin path: %v", path)
-		ents, err := os.read_all_directory_by_path(path, context.allocator)
+	for ent in state.runtime_path {
+		log.debugf("searching path: %v", ent)
+		ents, err := os.read_all_directory_by_path(ent, context.allocator)
 		if err != nil {
-			log.warnf("cannot open dirpath: %v", path)
+			log.warnf("cannot open path: %v", ent)
 			continue
 		}
 		for ent in ents {
@@ -37,7 +38,6 @@ find_executable :: proc(state: Shell_State, needle: string) -> (path: string, er
 			}
 		}
 	}
-
 	return "", nil
 }
 
@@ -60,22 +60,22 @@ parse_field :: #force_inline proc(s: string) -> int {
 	return n
 }
 
-parse_input :: proc(s: string) -> (toks: [dynamic]string, err: os.Error) {
+argparse :: proc(s: string) -> (args: [dynamic]string, err: os.Error) {
 	for pos := 0; pos < len(s); pos += 1 {
 		ch := s[pos]
 		if ch == ' ' || ch == '\n' {continue}
 		if ch == '"' || ch == '\'' {
 			n := parse_string_lit(s[pos:])
-			append(&toks, s[pos + 1:pos + n])
+			append(&args, s[pos + 1:pos + n])
 			pos += n
 		} else {
 			n := parse_field(s[pos:])
-			append(&toks, s[pos:pos + n])
+			append(&args, s[pos:pos + n])
 			pos += n
 		}
 	}
-	log.debugf("parsed toks: %v", toks)
-	return toks, nil
+	log.debugf("parsed args: %v", args)
+	return args, nil
 }
 
 main :: proc() {
@@ -96,7 +96,10 @@ main :: proc() {
 
 	context.logger = log.create_console_logger(.Debug when ODIN_DEBUG else .Info)
 
-	state := shell_state_init()
+	state, init_err := shell_state_init()
+	if init_err != nil {
+		os.exit(1)
+	}
 
 	for {
 		buf: [INPUT_LEN_MAX]byte
@@ -109,71 +112,72 @@ main :: proc() {
 			break
 		}
 
-		toks, parse_err := parse_input(string(buf[:n]))
+		args, parse_err := argparse(string(buf[:n]))
 		if parse_err != nil {
 			log.warnf("could not parse input: %v", parse_err)
 			continue
 		}
 
-		if len(toks) == 0 {continue}
+		if len(args) == 0 {continue}
 
-		img := toks[0]
-		if img == "exit" {
+		arg0 := args[0]
+		if arg0 == "exit" {
 			os.exit(0)
-		} else if img == "type" {
+		} else if arg0 == "type" {
 			log.fatal("TODO: type builtin not supported")
 			continue
-		} else if img == "cd" {
+		} else if arg0 == "cd" {
 			// TODO: cd without args into home
-
-            // TODO: cd - is still slightly buggy
-			path := toks[1]
+			path := args[1]
+			log.debugf("before: %v", state)
 			if path == "-" {
-				prev_path, ok := state.prev_path.?
-				if ok {
-					curr :=
-						os.get_working_directory(context.allocator) or_else panic(
-							"should get current dir",
-						)
-					os.change_directory(prev_path)
-					log.debugf("changed dir to:%v, curr:%v", state, curr)
-					state.prev_path = curr
+				oldpath := state.oldpath
+				log.debugf("change dir: %v", path)
+				if err := os.change_directory(oldpath); err != nil {
+					fmt.eprintfln("osh: cd: path:%v %v", oldpath, err)
 				} else {
-					// todo should fail
-					panic("TODO")
+					state.oldpath = state.currpath
+					state.currpath = oldpath
 				}
-			} else if os.is_directory(path) {
-				err := os.change_directory(path)
-				if err != nil {
-					panic("TODO")
+			} else {
+				abs_path, abs_err := os.get_absolute_path(path, context.allocator)
+				if abs_err != nil {
+					fmt.eprintfln("osh: cd: path:%v %v", path, abs_err)
+				}
+				log.debugf("change dir: %v", abs_path)
+				change_err := os.change_directory(abs_path)
+				if change_err != nil {
+					fmt.eprintfln("osh: cd: path:%v %v", abs_path, change_err)
 				} else {
-					state.prev_path = path
-					log.debugf("changed dir to:%v", path)
+					oldpath := state.currpath
+					state.currpath = abs_path
+					state.oldpath = oldpath
 				}
 			}
+			log.debugf("after: %v", state)
 			continue
 		}
 
 		// TODO: fix leaks
-		fullpath, find_err := find_executable(state, toks[0])
+		fullpath, find_err := find_executable(state, args[0])
 		if find_err != nil {
-			fmt.eprintfln("osh(%v): %v: %v", toks[0], find_err)
+			fmt.eprintfln("osh(%v): %v: %v", args[0], find_err)
 			continue
 		}
 
 		switch len(fullpath) {
 		case 0:
-			fmt.eprintfln("osh: %v: not found", img)
+			fmt.eprintfln("osh: %v: not found", arg0)
 		case:
-			desc := os.Process_Desc{"", toks[:], nil, os.stderr, os.stdout, os.stdin}
+			desc := os.Process_Desc{"", args[:], nil, os.stderr, os.stdout, os.stdin}
 			process, start_err := os.process_start(desc)
 			if start_err != nil {
-				fmt.eprintfln("osh: %v: %v", img, start_err)
+				fmt.eprintfln("osh: %v: %v", arg0, start_err)
 				continue
 			}
 			state, wait_err := os.process_wait(process)
 			if wait_err != nil {
-				fmt.eprintfln("osh(%v): %v: %v", state.exit_code, img, wait_err)
+				fmt.eprintfln("osh(%v): %v: %v", state.exit_code, arg0, wait_err)
 				continue
 			}
 		}
