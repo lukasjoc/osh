@@ -101,6 +101,8 @@ main :: proc() {
 		os.exit(1)
 	}
 
+	home_dir := os.user_home_dir(context.allocator) or_else panic("should get home dir of user")
+
 	for {
 		buf: [INPUT_LEN_MAX]byte
 
@@ -127,8 +129,12 @@ main :: proc() {
 			log.fatal("TODO: type builtin not supported")
 			continue
 		} else if arg0 == "cd" {
-			// TODO: cd without args into home
-			path := args[1]
+			path: string
+			if len(args) == 1 {
+				path = home_dir
+			} else {
+				path = args[1]
+			}
 			log.debugf("before: %v", state)
 			if path == "-" {
 				oldpath := state.oldpath
