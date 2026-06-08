@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:log"
 import "core:mem"
 import "core:os"
+import "core:slice/heap"
 import "core:strings"
 
 INPUT_LEN_MAX :: 256
@@ -39,6 +40,57 @@ find_executable :: proc(state: Shell_State, needle: string) -> (path: string, er
 		}
 	}
 	return "", nil
+}
+
+is_builtin_cmd :: #force_inline proc(cmd: string) -> bool {
+	switch cmd {
+	case "type", "exit", "cd":
+		return true
+	case:
+		return false
+	}
+}
+
+shell_state_cmd_type :: proc(state: Shell_State, args: []string) -> os.Error {
+	if len(args) < 2 {
+		return nil
+	}
+	if os.is_file(args[1]) {
+		p, err := os.get_absolute_path(args[1], context.allocator)
+		if err != nil {
+			return err
+		}
+		fmt.printfln("%s is %s", args[1], p)
+		return nil
+	}
+
+	found := false
+
+	if is_builtin_cmd(args[1]) {
+		found = true
+		fmt.printfln("%s is a shell builtin", args[1])
+	}
+
+	for ent in state.runtime_path {
+		log.debugf("searching path: %v", ent)
+		ents, err := os.read_all_directory_by_path(ent, context.allocator)
+		if err != nil {
+			log.warnf("cannot open path: %v", ent)
+			continue
+		}
+		for ent in ents {
+			if ent.name == args[1] {
+				found = true
+				fmt.printfln("%s is %s", args[1], ent.fullpath)
+			}
+		}
+	}
+
+	if found == false {
+		fmt.eprintfln("osh: type: %v: not found", args[1])
+	}
+
+	return nil
 }
 
 parse_string_lit :: #force_inline proc(s: string) -> int {
@@ -126,7 +178,9 @@ main :: proc() {
 		if arg0 == "exit" {
 			os.exit(0)
 		} else if arg0 == "type" {
-			log.fatal("TODO: type builtin not supported")
+			if err := shell_state_cmd_type(state, args[:]); err != nil {
+				fmt.eprintfln("osh: %v: %v", args[0], err)
+			}
 			continue
 		} else if arg0 == "cd" {
 			path: string
@@ -167,7 +221,7 @@ main :: proc() {
 		// TODO: fix leaks
 		fullpath, find_err := find_executable(state, args[0])
 		if find_err != nil {
-			fmt.eprintfln("osh(%v): %v: %v", args[0], find_err)
+			fmt.eprintfln("osh: %v: %v", args[0], find_err)
 			continue
 		}
 
