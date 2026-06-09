@@ -4,7 +4,6 @@ import "core:fmt"
 import "core:log"
 import "core:mem"
 import "core:os"
-import "core:slice/heap"
 import "core:strings"
 
 INPUT_LEN_MAX :: 256
@@ -42,8 +41,8 @@ find_executable :: proc(state: Shell_State, needle: string) -> (path: string, er
 	return "", nil
 }
 
-is_builtin_cmd :: #force_inline proc(cmd: string) -> bool {
-	switch cmd {
+is_builtin :: #force_inline proc(v: string) -> bool {
+	switch v {
 	case "type", "exit", "cd":
 		return true
 	case:
@@ -51,24 +50,57 @@ is_builtin_cmd :: #force_inline proc(cmd: string) -> bool {
 	}
 }
 
-shell_state_cmd_type :: proc(state: Shell_State, args: []string) -> os.Error {
-	if len(args) < 2 {
-		return nil
+
+Builtin_Exit :: enum {
+	Success,
+	Error,
+}
+
+shell_state_exec_builtin_type :: proc(state: Shell_State, args: []string) -> Builtin_Exit {
+	usage :: proc() -> Builtin_Exit {
+		fmt.eprintfln("Show the identity of a name visible to the shell")
+		fmt.eprintfln("usage: type [NAME]")
+		fmt.eprintfln("  -h, --help  show this help")
+		fmt.eprintfln("example: type cd")
+		fmt.eprintfln("example: type /usr/bin/git")
+		return Builtin_Exit.Success
 	}
-	if os.is_file(args[1]) {
-		p, err := os.get_absolute_path(args[1], context.allocator)
-		if err != nil {
-			return err
+
+	report_err :: proc(msg: string) -> Builtin_Exit {
+		fmt.eprintfln("error: %s", msg)
+		fmt.eprintfln("help: type --help")
+		return Builtin_Exit.Error
+	}
+
+	if len(args) < 2 {return usage()}
+
+	assert(args[0] == "type")
+	name := args[1]
+	for arg in args {
+		switch arg {
+		case "-h", "--help":
+			return usage()
+		case:
+			if strings.starts_with(arg, "-") {
+				return report_err(fmt.aprintf("unexpected option: `%s`", arg))
+			}
 		}
-		fmt.printfln("%s is %s", args[1], p)
-		return nil
+	}
+
+	if os.is_file(name) {
+		path, err := os.get_absolute_path(name, context.allocator)
+		if err != nil {
+			return report_err(fmt.aprintf("%v", err))
+		}
+		fmt.printfln("%s is %s", name, path)
+		return Builtin_Exit.Success
 	}
 
 	found := false
 
-	if is_builtin_cmd(args[1]) {
+	if is_builtin(name) {
 		found = true
-		fmt.printfln("%s is a shell builtin", args[1])
+		fmt.printfln("%s is a shell builtin", name)
 	}
 
 	for ent in state.runtime_path {
@@ -79,18 +111,18 @@ shell_state_cmd_type :: proc(state: Shell_State, args: []string) -> os.Error {
 			continue
 		}
 		for ent in ents {
-			if ent.name == args[1] {
+			if ent.name == name {
 				found = true
-				fmt.printfln("%s is %s", args[1], ent.fullpath)
+				fmt.printfln("%s is %s", name, ent.fullpath)
 			}
 		}
 	}
 
 	if found == false {
-		fmt.eprintfln("osh: type: %v: not found", args[1])
+		fmt.eprintfln("osh: type: %v: not found", name)
 	}
 
-	return nil
+	return Builtin_Exit.Success
 }
 
 parse_string_lit :: #force_inline proc(s: string) -> int {
@@ -178,9 +210,7 @@ main :: proc() {
 		if arg0 == "exit" {
 			os.exit(0)
 		} else if arg0 == "type" {
-			if err := shell_state_cmd_type(state, args[:]); err != nil {
-				fmt.eprintfln("osh: %v: %v", args[0], err)
-			}
+			shell_state_exec_builtin_type(state, args[:])
 			continue
 		} else if arg0 == "cd" {
 			path: string
