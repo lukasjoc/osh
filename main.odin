@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:log"
 import "core:mem"
 import "core:os"
+import "core:strconv"
 import "core:strings"
 
 INPUT_LEN_MAX :: 256
@@ -56,10 +57,52 @@ Builtin_Exit :: enum {
 	Error,
 }
 
-shell_state_exec_builtin_type :: proc(state: Shell_State, args: []string) -> Builtin_Exit {
+shell_state_exec_builtin_exit :: proc(state: ^Shell_State, args: []string) -> Builtin_Exit {
 	usage :: proc() -> Builtin_Exit {
-		fmt.eprintfln("Show the identity of a name visible to the shell")
-		fmt.eprintfln("usage: type [NAME]")
+		fmt.eprintfln("Exit the shell with a exit code. Note that only ony integers are allowed.")
+		fmt.eprintfln("usage: exit [code]")
+		fmt.eprintfln("  -h, --help  show this help")
+		fmt.eprintfln("example: exit")
+		fmt.eprintfln("example: exit 2")
+		return Builtin_Exit.Success
+	}
+
+	report_err :: proc(msg: string) -> Builtin_Exit {
+		fmt.eprintfln("error: %s", msg)
+		fmt.eprintfln("help: exit --help")
+		return Builtin_Exit.Error
+	}
+
+	if len(args) < 1 {return usage()}
+
+	assert(args[0] == "exit")
+
+	for arg in args {
+		switch arg {
+		case "-h", "--help":
+			return usage()
+		case:
+			if strings.starts_with(arg, "-") {
+				return report_err(fmt.aprintf("unexpected option: `%s`", arg))
+			}
+		}
+	}
+
+	code := 0
+	if len(args) > 1 {
+		code, ok := strconv.parse_int(args[1])
+		if !ok {
+			return report_err(fmt.aprintf("unexpected exit code: `%s`", args[1]))
+		}
+	}
+
+	os.exit(code)
+}
+
+shell_state_exec_builtin_type :: proc(state: ^Shell_State, args: []string) -> Builtin_Exit {
+	usage :: proc() -> Builtin_Exit {
+		fmt.eprintfln("Show the identity of a name visible to the shell.")
+		fmt.eprintfln("usage: type <name>")
 		fmt.eprintfln("  -h, --help  show this help")
 		fmt.eprintfln("example: type cd")
 		fmt.eprintfln("example: type /usr/bin/git")
@@ -125,6 +168,83 @@ shell_state_exec_builtin_type :: proc(state: Shell_State, args: []string) -> Bui
 	return Builtin_Exit.Success
 }
 
+shell_state_exec_builtin_cd :: proc(state: ^Shell_State, args: []string) -> Builtin_Exit {
+	usage :: proc() -> Builtin_Exit {
+		fmt.eprintfln(
+			"Change the current dir. If dir is not given it will change into the users home dir.",
+		)
+		fmt.eprintfln("usage: cd [-] [dir]")
+		fmt.eprintfln("  -           change to the previous dir")
+		fmt.eprintfln("  -h, --help  show this help")
+		fmt.eprintfln("example: cd")
+		fmt.eprintfln("example: cd -")
+		fmt.eprintfln("example: cd /bar")
+		return Builtin_Exit.Success
+	}
+
+	report_err :: proc(msg: string) -> Builtin_Exit {
+		fmt.eprintfln("error: %s", msg)
+		fmt.eprintfln("help: cd --help")
+		return Builtin_Exit.Error
+	}
+
+	if len(args) < 1 {return usage()}
+
+	assert(args[0] == "cd")
+
+	for arg in args {
+		switch arg {
+		case "-h", "--help":
+			return usage()
+		case "-":
+			continue
+		case:
+			if strings.starts_with(arg, "-") {
+				return report_err(fmt.aprintf("unexpected option: `%s`", arg))
+			}
+		}
+	}
+
+	home_dir := os.user_home_dir(context.allocator) or_else panic("should get home dir of user")
+
+	path: string
+
+	if len(args) == 1 {
+		path = home_dir
+	} else {
+		path = args[1]
+	}
+
+	log.debugf("before: %v", state)
+	if path == "-" {
+		oldpath := state.oldpath
+		log.debugf("change dir: %v", path)
+		if err := os.change_directory(oldpath); err != nil {
+			fmt.eprintfln("osh: cd: path:%v %v", oldpath, err)
+		} else {
+			state.oldpath = state.currpath
+			state.currpath = oldpath
+		}
+	} else {
+		abs_path, abs_err := os.get_absolute_path(path, context.allocator)
+		if abs_err != nil {
+			fmt.eprintfln("osh: cd: path:%v %v", path, abs_err)
+		}
+		log.debugf("change dir: %v", abs_path)
+		change_err := os.change_directory(abs_path)
+		if change_err != nil {
+			fmt.eprintfln("osh: cd: path:%v %v", abs_path, change_err)
+		} else {
+			oldpath := state.currpath
+			state.currpath = abs_path
+			state.oldpath = oldpath
+		}
+	}
+	log.debugf("after: %v", state)
+
+	return Builtin_Exit.Success
+}
+
 parse_string_lit :: #force_inline proc(s: string) -> int {
 	delim := s[0]
 	assert(delim == '"' || delim == '\'', "expected quote")
@@ -185,8 +305,6 @@ main :: proc() {
 		os.exit(1)
 	}
 
-	home_dir := os.user_home_dir(context.allocator) or_else panic("should get home dir of user")
-
 	for {
 		buf: [INPUT_LEN_MAX]byte
 
@@ -208,43 +326,13 @@ main :: proc() {
 
 		arg0 := args[0]
 		if arg0 == "exit" {
-			os.exit(0)
+			shell_state_exec_builtin_exit(&state, args[:])
+			continue
 		} else if arg0 == "type" {
-			shell_state_exec_builtin_type(state, args[:])
+			shell_state_exec_builtin_type(&state, args[:])
 			continue
 		} else if arg0 == "cd" {
-			path: string
-			if len(args) == 1 {
-				path = home_dir
-			} else {
-				path = args[1]
-			}
-			log.debugf("before: %v", state)
-			if path == "-" {
-				oldpath := state.oldpath
-				log.debugf("change dir: %v", path)
-				if err := os.change_directory(oldpath); err != nil {
-					fmt.eprintfln("osh: cd: path:%v %v", oldpath, err)
-				} else {
-					state.oldpath = state.currpath
-					state.currpath = oldpath
-				}
-			} else {
-				abs_path, abs_err := os.get_absolute_path(path, context.allocator)
-				if abs_err != nil {
-					fmt.eprintfln("osh: cd: path:%v %v", path, abs_err)
-				}
-				log.debugf("change dir: %v", abs_path)
-				change_err := os.change_directory(abs_path)
-				if change_err != nil {
-					fmt.eprintfln("osh: cd: path:%v %v", abs_path, change_err)
-				} else {
-					oldpath := state.currpath
-					state.currpath = abs_path
-					state.oldpath = oldpath
-				}
-			}
-			log.debugf("after: %v", state)
+			shell_state_exec_builtin_cd(&state, args[:])
 			continue
 		}
 
