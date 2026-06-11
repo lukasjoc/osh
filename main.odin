@@ -1,5 +1,6 @@
 package main
 
+import "core:encoding/ini"
 import "core:fmt"
 import "core:log"
 import "core:mem"
@@ -13,18 +14,27 @@ Shell_State :: struct {
 	runtime_path: []string,
 	oldpath:      string,
 	currpath:     string,
+	config:       ini.Map,
 }
 
-shell_state_init :: proc() -> (state: Shell_State, init_err: os.Error) {
+shell_state_init :: proc() -> (state: Shell_State, err: os.Error) {
 	value, _ := os.lookup_env_alloc("PATH", context.allocator)
 	path := strings.split(value, ":")
 	dir := os.get_working_directory(context.allocator) or_return
-	return {runtime_path = path, oldpath = "", currpath = dir}, nil
+	config, config_err, ok := ini.load_map_from_path(".oshconfig", context.allocator)
+	if config_err != nil {
+		return {}, config_err
+	}
+	return {runtime_path = path, oldpath = "", currpath = dir, config = config}, nil
 }
 
-find_executable :: proc(state: Shell_State, needle: string) -> (path: string, err: os.Error) {
+find_executable :: proc(state: ^Shell_State, needle: string) -> (string, os.Error, bool) {
 	if os.is_file(needle) {
-		return os.get_absolute_path(needle, context.allocator)
+		path, err := os.get_absolute_path(needle, context.allocator)
+		if err != nil {
+			return "", err, false
+		}
+		return path, nil, true
 	}
 	for ent in state.runtime_path {
 		log.debugf("searching path: %v", ent)
@@ -35,11 +45,11 @@ find_executable :: proc(state: Shell_State, needle: string) -> (path: string, er
 		}
 		for ent in ents {
 			if ent.name == needle {
-				return ent.fullpath, nil
+				return ent.fullpath, nil, true
 			}
 		}
 	}
-	return "", nil
+	return "", nil, false
 }
 
 is_builtin :: #force_inline proc(v: string) -> bool {
@@ -52,25 +62,25 @@ is_builtin :: #force_inline proc(v: string) -> bool {
 }
 
 
-Builtin_Exit :: enum {
-	Success,
-	Error,
+Exit_Code :: enum {
+	Success = 0,
+	Error   = 1,
 }
 
-shell_state_exec_builtin_exit :: proc(state: ^Shell_State, args: []string) -> Builtin_Exit {
-	usage :: proc() -> Builtin_Exit {
+shell_state_exec_builtin_exit :: proc(state: ^Shell_State, args: []string) -> Exit_Code {
+	usage :: proc() -> Exit_Code {
 		fmt.eprintfln("Exit the shell with a exit code. Note that only ony integers are allowed.")
 		fmt.eprintfln("usage: exit [code]")
 		fmt.eprintfln("  -h, --help  show this help")
 		fmt.eprintfln("example: exit")
 		fmt.eprintfln("example: exit 2")
-		return Builtin_Exit.Success
+		return .Success
 	}
 
-	report_err :: proc(msg: string) -> Builtin_Exit {
+	report_err :: proc(msg: string) -> Exit_Code {
 		fmt.eprintfln("error: %s", msg)
 		fmt.eprintfln("help: exit --help")
-		return Builtin_Exit.Error
+		return .Error
 	}
 
 	if len(args) < 1 {return usage()}
@@ -99,20 +109,21 @@ shell_state_exec_builtin_exit :: proc(state: ^Shell_State, args: []string) -> Bu
 	os.exit(code)
 }
 
-shell_state_exec_builtin_type :: proc(state: ^Shell_State, args: []string) -> Builtin_Exit {
-	usage :: proc() -> Builtin_Exit {
+shell_state_exec_builtin_type :: proc(state: ^Shell_State, args: []string) -> Exit_Code {
+	// TODO: support for aliases
+	usage :: proc() -> Exit_Code {
 		fmt.eprintfln("Show the identity of a name visible to the shell.")
 		fmt.eprintfln("usage: type <name>")
 		fmt.eprintfln("  -h, --help  show this help")
 		fmt.eprintfln("example: type cd")
 		fmt.eprintfln("example: type /usr/bin/git")
-		return Builtin_Exit.Success
+		return .Success
 	}
 
-	report_err :: proc(msg: string) -> Builtin_Exit {
+	report_err :: proc(msg: string) -> Exit_Code {
 		fmt.eprintfln("error: %s", msg)
 		fmt.eprintfln("help: type --help")
-		return Builtin_Exit.Error
+		return .Error
 	}
 
 	if len(args) < 2 {return usage()}
@@ -136,7 +147,7 @@ shell_state_exec_builtin_type :: proc(state: ^Shell_State, args: []string) -> Bu
 			return report_err(fmt.aprintf("%v", err))
 		}
 		fmt.printfln("%s is %s", name, path)
-		return Builtin_Exit.Success
+		return .Success
 	}
 
 	found := false
@@ -165,11 +176,11 @@ shell_state_exec_builtin_type :: proc(state: ^Shell_State, args: []string) -> Bu
 		fmt.eprintfln("osh: type: %v: not found", name)
 	}
 
-	return Builtin_Exit.Success
+	return .Success
 }
 
-shell_state_exec_builtin_cd :: proc(state: ^Shell_State, args: []string) -> Builtin_Exit {
-	usage :: proc() -> Builtin_Exit {
+shell_state_exec_builtin_cd :: proc(state: ^Shell_State, args: []string) -> Exit_Code {
+	usage :: proc() -> Exit_Code {
 		fmt.eprintfln(
 			"Change the current dir. If dir is not given it will change into the users home dir.",
 		)
@@ -179,13 +190,13 @@ shell_state_exec_builtin_cd :: proc(state: ^Shell_State, args: []string) -> Buil
 		fmt.eprintfln("example: cd")
 		fmt.eprintfln("example: cd -")
 		fmt.eprintfln("example: cd /bar")
-		return Builtin_Exit.Success
+		return .Success
 	}
 
-	report_err :: proc(msg: string) -> Builtin_Exit {
+	report_err :: proc(msg: string) -> Exit_Code {
 		fmt.eprintfln("error: %s", msg)
 		fmt.eprintfln("help: cd --help")
-		return Builtin_Exit.Error
+		return .Error
 	}
 
 	if len(args) < 1 {return usage()}
@@ -221,28 +232,29 @@ shell_state_exec_builtin_cd :: proc(state: ^Shell_State, args: []string) -> Buil
 		log.debugf("change dir: %v", path)
 		if err := os.change_directory(oldpath); err != nil {
 			fmt.eprintfln("osh: cd: path:%v %v", oldpath, err)
-		} else {
-			state.oldpath = state.currpath
-			state.currpath = oldpath
+			return .Error
 		}
+		state.oldpath = state.currpath
+		state.currpath = oldpath
 	} else {
 		abs_path, abs_err := os.get_absolute_path(path, context.allocator)
 		if abs_err != nil {
 			fmt.eprintfln("osh: cd: path:%v %v", path, abs_err)
+			return .Error
 		}
 		log.debugf("change dir: %v", abs_path)
 		change_err := os.change_directory(abs_path)
 		if change_err != nil {
 			fmt.eprintfln("osh: cd: path:%v %v", abs_path, change_err)
-		} else {
-			oldpath := state.currpath
-			state.currpath = abs_path
-			state.oldpath = oldpath
+			return .Error
 		}
+		oldpath := state.currpath
+		state.currpath = abs_path
+		state.oldpath = oldpath
 	}
 	log.debugf("after: %v", state)
 
-	return Builtin_Exit.Success
+	return .Success
 }
 
 parse_string_lit :: #force_inline proc(s: string) -> int {
@@ -282,6 +294,46 @@ argparse :: proc(s: string) -> (args: [dynamic]string, err: os.Error) {
 	return args, nil
 }
 
+shell_state_exec :: proc(state: ^Shell_State, args: []string) -> Exit_Code {
+	assert(len(args) > 0)
+	name := args[0]
+
+	if name == "exit" {
+		return shell_state_exec_builtin_exit(state, args[:])
+	} else if name == "type" {
+		return shell_state_exec_builtin_type(state, args[:])
+	} else if name == "cd" {
+		return shell_state_exec_builtin_cd(state, args[:])
+	}
+
+	fullpath, find_err, ok := find_executable(state, name)
+	if find_err != nil {
+		fmt.eprintfln("osh: %v: %v", name, find_err)
+		return .Error
+	}
+
+	if !ok {
+		fmt.eprintfln("osh: %v: not found", name)
+		return .Error
+	}
+
+	desc := os.Process_Desc{"", args[:], nil, os.stderr, os.stdout, os.stdin}
+	process, start_err := os.process_start(desc)
+	if start_err != nil {
+		fmt.eprintfln("osh: %v: %v", name, start_err)
+		return .Error
+	}
+
+	state, wait_err := os.process_wait(process)
+	if wait_err != nil {
+		fmt.eprintfln("osh(%v): %v: %v", state.exit_code, name, wait_err)
+		return .Error
+	}
+
+	return .Success
+}
+
+// TODO: fix leaks
 main :: proc() {
 	when ODIN_DEBUG {
 		track: mem.Tracking_Allocator
@@ -324,40 +376,22 @@ main :: proc() {
 
 		if len(args) == 0 {continue}
 
-		arg0 := args[0]
-		if arg0 == "exit" {
-			shell_state_exec_builtin_exit(&state, args[:])
-			continue
-		} else if arg0 == "type" {
-			shell_state_exec_builtin_type(&state, args[:])
-			continue
-		} else if arg0 == "cd" {
-			shell_state_exec_builtin_cd(&state, args[:])
+		name := args[0]
+
+		if value, ok := state.config["alias"][name]; ok {
+			log.debugf("alias: %v", value)
+			augmented, parse_err := argparse(value)
+			if parse_err != nil {
+				log.warnf("could not parse input: %v", parse_err)
+				continue
+			}
+			if len(args) == 0 {continue}
+			append(&augmented, ..args[1:])
+			log.debugf("augmented args: %v", augmented[:])
+			_exit := shell_state_exec(&state, augmented[:])
 			continue
 		}
 
-		// TODO: fix leaks
-		fullpath, find_err := find_executable(state, args[0])
-		if find_err != nil {
-			fmt.eprintfln("osh: %v: %v", args[0], find_err)
-			continue
-		}
-
-		switch len(fullpath) {
-		case 0:
-			fmt.eprintfln("osh: %v: not found", arg0)
-		case:
-			desc := os.Process_Desc{"", args[:], nil, os.stderr, os.stdout, os.stdin}
-			process, start_err := os.process_start(desc)
-			if start_err != nil {
-				fmt.eprintfln("osh: %v: %v", arg0, start_err)
-				continue
-			}
-			state, wait_err := os.process_wait(process)
-			if wait_err != nil {
-				fmt.eprintfln("osh(%v): %v: %v", state.exit_code, arg0, wait_err)
-				continue
-			}
-		}
+		_exit := shell_state_exec(&state, args[:])
 	}
 }
