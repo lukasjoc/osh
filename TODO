@@ -12,6 +12,7 @@
  - basic navigation
  - history
  - vi mode
+- full static build (without lua dlopen support)
 ? jobs/background processes (bg,fg)
 ? scripting, custom shell dialect
 

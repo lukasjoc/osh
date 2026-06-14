@@ -1,12 +1,14 @@
 package main
 
-import "core:encoding/ini"
+import "base:runtime"
+import "core:c/libc"
 import "core:fmt"
 import "core:log"
 import "core:mem"
 import "core:os"
 import "core:strconv"
 import "core:strings"
+import lua "vendor:lua/5.4"
 
 INPUT_LEN_MAX :: 256
 
@@ -14,18 +16,13 @@ Shell_State :: struct {
 	runtime_path: []string,
 	oldpath:      string,
 	currpath:     string,
-	config:       ini.Map,
 }
 
 shell_state_init :: proc() -> (state: Shell_State, err: os.Error) {
 	value, _ := os.lookup_env_alloc("PATH", context.allocator)
 	path := strings.split(value, ":")
 	dir := os.get_working_directory(context.allocator) or_return
-	config, config_err, ok := ini.load_map_from_path(".oshconfig", context.allocator)
-	if config_err != nil {
-		return {}, config_err
-	}
-	return {runtime_path = path, oldpath = "", currpath = dir, config = config}, nil
+	return {runtime_path = path, oldpath = "", currpath = dir}, nil
 }
 
 find_executable :: proc(state: ^Shell_State, needle: string) -> (string, os.Error, bool) {
@@ -333,24 +330,121 @@ shell_state_exec :: proc(state: ^Shell_State, args: []string) -> Exit_Code {
 	return .Success
 }
 
+luaregister_lib :: proc(state: ^lua.State, name: cstring, lib: lua.CFunction) -> libc.int {
+	lua.getglobal(state, cstring("package"))
+	lua.getfield(state, -1, cstring("preload"))
+	lua.pushcfunction(state, lib)
+	lua.setfield(state, -2, name)
+	lua.pop(state, 2)
+	return 0
+}
+
+
+Shared_Config :: struct #packed {
+	prompt:  string,
+	aliases: map[string]string,
+}
+
+shared_config: Shared_Config
+
+osh_prelude_bind_alias :: proc "c" (state: ^lua.State) -> libc.int {
+	cvalue := lua.tostring(state, lua.gettop(state))
+	lua.pop(state, 1)
+	cname := lua.tostring(state, lua.gettop(state))
+	lua.pop(state, 1)
+	lua.pushlightuserdata(state, rawptr(&shared_config))
+	lua.gettable(state, lua.REGISTRYINDEX)
+	if !lua.islightuserdata(state, -1) {
+		return 1
+	}
+	shared := cast(^Shared_Config)lua.touserdata(state, -1)
+	context = runtime.default_context()
+	when ODIN_DEBUG {libc.printf("defining alias: %s=%s\n", cname, cvalue)}
+	name, _ := strings.clone_from_cstring(cname)
+	value, _ := strings.clone_from_cstring(cvalue)
+	map_insert(&shared.aliases, name, value)
+	return 0
+}
+
+osh_prelude_set_prompt :: proc "c" (state: ^lua.State) -> libc.int {
+	cvalue := lua.tostring(state, lua.gettop(state))
+	lua.pop(state, 1)
+	lua.pushlightuserdata(state, rawptr(&shared_config))
+	lua.gettable(state, lua.REGISTRYINDEX)
+	if !lua.islightuserdata(state, -1) {
+		return 1
+	}
+	shared := cast(^Shared_Config)lua.touserdata(state, -1)
+	context = runtime.default_context()
+	when ODIN_DEBUG {libc.printf("defining prompt: %s\n", cvalue)}
+	value, err := strings.clone_from_cstring(cvalue)
+	shared.prompt = value
+	return 0
+}
+
+luaopen_osh_prelude :: proc "c" (state: ^lua.State) -> libc.int {
+	context = runtime.default_context()
+	reg := []lua.L_Reg {
+		{name = cstring("bind_alias"), func = osh_prelude_bind_alias},
+		{name = cstring("set_prompt"), func = osh_prelude_set_prompt},
+		{},
+	}
+	lua.pushlightuserdata(state, rawptr(&shared_config))
+	lua.pushlightuserdata(state, rawptr(&shared_config))
+	lua.settable(state, lua.REGISTRYINDEX)
+	lua.L_newlib(state, reg)
+	return 1
+}
+
+
 // TODO: fix leaks
 main :: proc() {
+	context.logger = log.create_console_logger(.Debug when ODIN_DEBUG else .Info)
+
 	when ODIN_DEBUG {
 		track: mem.Tracking_Allocator
 		mem.tracking_allocator_init(&track, context.allocator)
 		context.allocator = mem.tracking_allocator(&track)
 		defer {
 			if len(track.allocation_map) > 0 {
-				fmt.eprintf("=== %v allocations not freed: ===\n", len(track.allocation_map))
+				log.fatalf("=== %v allocations not freed: ===\n", len(track.allocation_map))
 				for _, entry in track.allocation_map {
-					fmt.eprintf("- %v bytes @ %v\n", entry.size, entry.location)
+					log.fatalf("- %v bytes @ %v\n", entry.size, entry.location)
 				}
 			}
 			mem.tracking_allocator_destroy(&track)
 		}
 	}
 
-	context.logger = log.create_console_logger(.Debug when ODIN_DEBUG else .Info)
+	shared_config = {
+		prompt  = "$>",
+		aliases = make(map[string]string),
+	}
+
+	L := lua.L_newstate()
+	defer lua.close(L)
+	if L == nil {
+		fmt.println("no lua for you sir/or madam!")
+		return
+	}
+
+
+	lua.L_openlibs(L)
+
+	luaregister_lib(L, "osh_prelude", luaopen_osh_prelude)
+
+	if ret := lua.L_dofile(L, "config.lua"); ret != 0 {
+		error := lua.tostring(L, -1)
+		fmt.println(error)
+		lua.pop(L, 1)
+	}
+
+	when ODIN_DEBUG {
+		log.infof("Collected aliases that are still in scope!!")
+		for key, value in shared_config.aliases {
+			log.infof("ALIAS(%s): %s", key, value)
+		}
+	}
 
 	state, init_err := shell_state_init()
 	if init_err != nil {
@@ -360,7 +454,7 @@ main :: proc() {
 	for {
 		buf: [INPUT_LEN_MAX]byte
 
-		fmt.printf("%v:$ ", os.args[0])
+		fmt.printf("%s", shared_config.prompt)
 
 		n, read_err := os.read(os.stdin, buf[:])
 		if read_err != nil {
@@ -378,7 +472,7 @@ main :: proc() {
 
 		name := args[0]
 
-		if value, ok := state.config["alias"][name]; ok {
+		if value, ok := shared_config.aliases[name]; ok {
 			log.debugf("alias: %v", value)
 			augmented, parse_err := argparse(value)
 			if parse_err != nil {

@@ -1,7 +1,0 @@
-; Aliases
-[alias]
-    ..=cd ../
-    ls=ls --color=auto
-    ll=ls --color=auto -larth
-    grep=grep --color=auto
-    clear=printf '\e[1;1H\e[2J'
